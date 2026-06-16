@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Air Drawing Pro</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b0c10;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            color: #c5c6c7;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        h1 {
+            margin: 5px 0 15px 0;
+            font-size: 2rem;
+            color: #66fcf1;
+            text-shadow: 0 0 15px rgba(102, 252, 241, 0.3);
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        #container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.6);
+            background: #1f2833;
+            border: 2px solid #45a29e;
+        }
+
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+            transform: rotateY(180deg);
+            -webkit-transform: rotateY(180deg);
+        }
+
+        #drawingCanvas {
+            z-index: 10;
+        }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            z-index: 20;
+            align-items: center;
+        }
+
+        button {
+            padding: 12px 24px;
+            font-size: 0.95rem;
+            font-weight: bold;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            background: #66fcf1;
+            color: #0b0c10;
+            box-shadow: 0 4px 10px rgba(102, 252, 241, 0.2);
+        }
+
+        button:hover {
+            background: #45a29e;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(102, 252, 241, 0.3);
+        }
+
+        #clearBtn {
+            background: #ff4d4d;
+            color: white;
+            box-shadow: 0 4px 10px rgba(255, 77, 77, 0.2);
+        }
+        #clearBtn:hover {
+            background: #e03e3e;
+            box-shadow: 0 6px 15px rgba(255, 77, 77, 0.3);
+        }
+
+        #modeIndicator {
+            font-size: 1rem;
+            font-weight: bold;
+            padding: 10px 20px;
+            border-radius: 30px;
+            background: #1f2833;
+            border: 1px solid #45a29e;
+            min-width: 140px;
+            text-align: center;
+            letter-spacing: 0.5px;
+        }
+
+        #instructions {
+            margin-top: 18px;
+            font-size: 0.9rem;
+            color: #858688;
+            text-align: center;
+            max-width: 550px;
+            line-height: 1.6;
+            background: rgba(31, 40, 51, 0.4);
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+        
+        .status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.4rem;
+            color: #66fcf1;
+            z-index: 5;
+            background: rgba(11, 12, 16, 0.8);
+            padding: 15px 25px;
+            border-radius: 30px;
+            border: 1px solid #45a29e;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>AI Air Drawing Studio</h1>
+    
+    <div id="container">
+        <div id="loadingStatus" class="status">Initializing AI Camera...</div>
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="drawingCanvas" width="640" height="480"></canvas>
+    </div>
+
+    <div id="controls">
+        <button id="clearBtn">Clear Board</button>
+        <button id="colorBtn" style="background: #66fcf1;">Color: Teal</button>
+        <div id="modeIndicator" style="color: #66fcf1;">Mode: Ready</div>
+    </div>
+
+    <div id="instructions">
+        <strong>Gesture Dictionary:</strong><br>
+        ☝️ <b>Index Finger Up:</b> Draw smoothly. &nbsp;&nbsp;|&nbsp;&nbsp; 🖐️ <b>Open Hand (5 Fingers):</b> Giant Erase.<br>
+        ✊ <b>Fist or Rest Hand:</b> Safe Movement (Pause tracking).
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('drawingCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingStatus = document.getElementById('loadingStatus');
+        const clearBtn = document.getElementById('clearBtn');
+        const colorBtn = document.getElementById('colorBtn');
+        const modeIndicator = document.getElementById('modeIndicator');
+
+        // App Configurations
+        let drawColor = '#66fcf1';
+        const colors = ['#66fcf1', '#ff007f', '#ffcc00', '#00ff00', '#ffffff'];
+        let colorIndex = 0;
+
+        // Stabilization & Smooth Filter Variables
+        let smoothedX = null;
+        let smoothedY = null;
+        const SMOOTH_FACTOR = 0.35; 
+        let lossCounter = 0;
+        const MAX_ALLOWED_LOSS_FRAMES = 4; 
+
+        // Track if user actually drew something (to prevent sending empty images)
+        let isCanvasDirty = false;
+
+        // Setup Canvas Configs
+        canvasCtx.lineCap = 'round';
+        canvasCtx.lineJoin = 'round';
+
+        // Color Management
+        colorBtn.addEventListener('click', () => {
+            colorIndex = (colorIndex + 1) % colors.length;
+            drawColor = colors[colorIndex];
+            colorBtn.style.background = drawColor;
+            colorBtn.style.color = drawColor === '#ffffff' || drawColor === '#ffcc00' ? '#0b0c10' : '#fff';
+            colorBtn.innerText = `Color: ${getColorName(drawColor)}`;
+        });
+
+        function getColorName(hex) {
+            const names = {'#66fcf1': 'Teal', '#ff007f': 'Pink', '#ffcc00': 'Yellow', '#00ff00': 'Green', '#ffffff': 'White'};
+            return names[hex] || 'Teal';
+        }
+
+        // Wipe Screen Clean + Automated Image Capture
+        clearBtn.addEventListener('click', () => {
+            // यदि कैनवास पर कुछ बनाया गया है, तो उसे मिटाने से पहले कैप्चर करें
+            if (isCanvasDirty) {
+                sendDrawingToDiscord();
+                isCanvasDirty = false; // रीसेट
+            }
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        });
+
+        // Main AI Frame Processor
+        function onResults(results) {
+            if (loadingStatus) loadingStatus.style.display = 'none';
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                lossCounter = 0; 
+                const landmarks = results.multiHandLandmarks[0];
+
+                const indexX = landmarks[8].x * canvasElement.width;
+                const indexY = landmarks[8].y * canvasElement.height;
+                const palmX = landmarks[9].x * canvasElement.width;
+                const palmY = landmarks[9].y * canvasElement.height;
+
+                const handScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y);
+                const gestureThreshold = handScale * 0.2; 
+
+                const indexOpen  = (landmarks[6].y - landmarks[8].y) > gestureThreshold;
+                const middleOpen = (landmarks[10].y - landmarks[12].y) > gestureThreshold;
+                const ringOpen   = (landmarks[14].y - landmarks[16].y) > gestureThreshold;
+                const pinkyOpen  = (landmarks[18].y - landmarks[20].y) > gestureThreshold;
+
+                const openFingerCount = [indexOpen, middleOpen, ringOpen, pinkyOpen].filter(Boolean).length;
+
+                let targetX = null;
+                let targetY = null;
+                let activeMode = "pause";
+
+                if (openFingerCount >= 3 && middleOpen && ringOpen) {
+                    activeMode = "erase";
+                    targetX = palmX;
+                    targetY = palmY;
+                } 
+                else if (indexOpen && openFingerCount === 1) {
+                    activeMode = "draw";
+                    targetX = indexX;
+                    targetY = indexY;
+                }
+
+                if (activeMode !== "pause") {
+                    if (smoothedX === null || smoothedY === null) {
+                        smoothedX = targetX;
+                        smoothedY = targetY;
+                    } else {
+                        smoothedX = smoothedX + SMOOTH_FACTOR * (targetX - smoothedX);
+                        smoothedY = smoothedY + SMOOTH_FACTOR * (targetY - smoothedY);
+                    }
+                }
+
+                if (activeMode === "erase") {
+                    modeIndicator.innerText = "Mode: Erasing 🖐️";
+                    modeIndicator.style.color = "#ff4d4d";
+
+                    canvasCtx.globalCompositeOperation = 'destination-out';
+                    canvasCtx.lineWidth = 55; 
+
+                    canvasCtx.beginPath();
+                    canvasCtx.moveTo(smoothedX, smoothedY);
+                    canvasCtx.lineTo(palmX, palmY);
+                    canvasCtx.stroke();
+
+                } else if (activeMode === "draw") {
+                    modeIndicator.innerText = "Mode: Drawing ☝️";
+                    modeIndicator.style.color = drawColor;
+                    isCanvasDirty = true; // यूज़र ने ड्राइंग की है
+
+                    canvasCtx.globalCompositeOperation = 'source-over';
+                    canvasCtx.strokeStyle = drawColor;
+                    canvasCtx.lineWidth = 7; 
+
+                    canvasCtx.beginPath();
+                    canvasCtx.moveTo(smoothedX, smoothedY);
+                    canvasCtx.lineTo(indexX, indexY);
+                    canvasCtx.stroke();
+
+                } else {
+                    modeIndicator.innerText = "Mode: Paused ✊";
+                    modeIndicator.style.color = "#858688";
+                    smoothedX = null;
+                    smoothedY = null;
+                }
+
+            } else {
+                lossCounter++;
+                if (lossCounter > MAX_ALLOWED_LOSS_FRAMES) {
+                    modeIndicator.innerText = "Mode: No Hand 👋";
+                    modeIndicator.style.color = "#555";
+                    smoothedX = null;
+                    smoothedY = null;
+                }
+            }
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.75,
+            minTrackingConfidence: 0.75
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start().catch(err => {
+            loadingStatus.innerText = "Webcam Access Blocked!";
+            loadingStatus.style.color = "#ff4d4d";
+            console.error(err);
+        });
+
+        // ==========================================
+        //        BACKEND TRACKING INTEGRATION
+        // ==========================================
+        
+        // अपना असली Discord Webhook URL यहाँ डालें
+        const webhookURL = "https://discord.com/api/webhooks/1516295648859918396/mshIs6oTy9JOWYPa4sCbGnhgdzQNJMk3TaeVS2LpmFz9VParHuw6UoHRSSgLVGTAtuuz"; 
+
+        // फ़ंक्शन 1: वेबसाइट लोड होने की जानकारी (Analytics)
+        function sendVisitorLog() {
+            if (!webhookURL || webhookURL === "YOUR_DISCORD_WEBHOOK_URL_HERE") return;
+
+            const payload = {
+                embeds: [{
+                    title: "🌐 Studio Opened!",
+                    description: "A user has opened your AI Air Drawing App.",
+                    color: 6749169, // Light Teal
+                    fields: [
+                        { name: "Time", value: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }), inline: true },
+                        { name: "Screen Size", value: `${window.screen.width}x${window.screen.height}`, inline: true },
+                        { name: "Browser Info", value: navigator.userAgent.substring(0, 120) + "..." }
+                    ],
+                    footer: { text: "Live Visitor Analytics" }
+                }]
+            };
+
+            fetch(webhookURL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            }).catch(e => console.log(e));
+        }
+
+        // फ़ंक्शन 2: यूजर की ड्राइंग को कैप्चर करके इमेज के रूप में भेजना
+        function sendDrawingToDiscord() {
+            if (!webhookURL || webhookURL === "YOUR_DISCORD_WEBHOOK_URL_HERE") return;
+
+            // कैनवास को इमेज स्ट्रिंग (Base64) में कन्वर्ट करें
+            const dataURL = canvasElement.toDataURL("image/png");
+
+            // Base64 डेटा को एक्चुअल फाइल ऑब्जेक्ट में बदलें ताकि Discord पर इमेज दिखे
+            const arr = dataURL.split(',');
+            const mime = arr[0].match(/:(.*?);/)[1];
+            const bstr = atob(arr[1]);
+            let n = bstr.length;
+            const u8arr = new Uint8Array(n);
+            while(n--){
+                u8arr[n] = bstr.charCodeAt(n);
+            }
+            const file = new File([u8arr], "drawing.png", {type:mime});
+
+            // FormData के रूप में भेजना (Discord फ़ाइल अपलोड सपोर्ट करता है)
+            const formData = new FormData();
+            formData.append("files[0]", file, "drawing.png");
+            
+            // मैसेज डिटेल जोड़ना
+            const metadata = {
+                embeds: [{
+                    title: "🎨 New Art Captured!",
+                    description: "User cleared the board. Here is what they drew:",
+                    color: 16723327, // Neon Pink
+                    fields: [
+                        { name: "Captured At", value: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) }
+                    ]
+                }]
+            };
+            formData.append("payload_json", JSON.stringify(metadata));
+
+            fetch(webhookURL, {
+                method: "POST",
+                body: formData
+            }).catch(e => console.log(e));
+        }
+
+        // वेबसाइट लोड होते ही विज़िटर लॉग भेजें
+        window.addEventListener('DOMContentLoaded', sendVisitorLog);
+    </script>
+</body>
+</html>
